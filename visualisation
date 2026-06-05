@@ -1,0 +1,377 @@
+import torch
+import torchaudio
+import torchaudio.transforms as T
+import torch.nn.functional as F
+import librosa
+import librosa.display
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+import os
+from torchvision import models
+import torch.nn as nn
+'''
+# НАСТРОЙКИ 
+BELUGA_FILE = "dataset_final/train/beluga/6b2bb6685db6577 (mp3cut.net) (5).wav"  
+NOISE_FILE = "dataset_final/train/noise/19.08.2020_1306_суда7.wav"  
+SR = 30242  
+DURATION = 3  
+N_FFT = 2048
+HOP_LENGTH = 512
+
+
+def fix_length(y, target_samples):
+    if len(y) > target_samples:
+        return y[:target_samples]
+    else:
+        return np.pad(y, (0, target_samples - len(y)))
+
+
+def create_augmentation_plot():
+    target_samples = SR * DURATION
+
+    y_beluga, _ = librosa.load(BELUGA_FILE, sr=SR)
+    y_noise, _ = librosa.load(NOISE_FILE, sr=SR)
+
+    y_beluga = fix_length(y_beluga, target_samples)
+    y_noise = fix_length(y_noise, target_samples)
+
+    y_beluga = y_beluga / (np.max(np.abs(y_beluga)) + 1e-8)
+    y_noise = y_noise / (np.max(np.abs(y_noise)) + 1e-8)
+
+    y_mixed = (y_beluga * 0.6) + (y_noise * 0.4)
+    y_mixed = y_mixed / (np.max(np.abs(y_mixed)) + 1e-8)
+
+    # Расчет спектрограмм
+    def get_spec(y):
+        D = librosa.stft(y, n_fft=N_FFT, hop_length=HOP_LENGTH)
+        return librosa.amplitude_to_db(np.abs(D), ref=np.max)
+
+    s_beluga = get_spec(y_beluga)
+    s_noise = get_spec(y_noise)
+    s_mixed = get_spec(y_mixed)
+
+    # Визуализация
+    fig, ax = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Настройки отображения
+    params = {
+        'sr': SR,
+        'hop_length': HOP_LENGTH,
+        'x_axis': 'time',
+        'y_axis': 'linear',
+        'cmap': 'magma',
+        'vmin': -60,
+        'vmax': 0
+    }
+
+    # График 1: Чистый звук белухи
+    img1 = librosa.display.specshow(s_beluga, ax=ax[0], **params)
+    ax[0].set_title("А: Исходный сигнал (Белуха)")
+    ax[0].set_ylabel("Частота (Гц)")
+    ax[0].set_ylim(500, 14000)
+
+    # График 2: Шум
+    img2 = librosa.display.specshow(s_noise, ax=ax[1], **params)
+    ax[1].set_title("Б: Исходный шум (Обская губа)")
+    ax[1].set_ylabel("")  # Убираем лишние подписи по центру
+    ax[1].set_ylim(500, 14000)
+
+    # График 3: Смесь
+    img3 = librosa.display.specshow(s_mixed, ax=ax[2], **params)
+    ax[2].set_title("В: Результат Background Injection")
+    ax[2].set_ylabel("")
+    ax[2].set_ylim(500, 14000)
+
+    plt.tight_layout()
+    plt.savefig("augmentation_demo.png", dpi=300)
+    plt.show()
+
+
+if __name__ == "__main__":
+    create_augmentation_plot()
+
+'''
+
+FILE_PATH = "dataset_final/train/beluga/O5_15.08.2020_1944белуха8.wav"  # Замени на свой файл
+SR = 30242
+N_FFT = 2048
+HOP_LENGTH = 512
+
+
+def plot_comparisons(path):
+    # Загрузка
+    y, sr = librosa.load(path, sr=SR)
+
+    # 1. Линейная спектрограмма
+    D = librosa.stft(y, n_fft=N_FFT, hop_length=HOP_LENGTH)
+    S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
+
+    # 2. Мел-спектрограмма
+    M = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=N_FFT, hop_length=HOP_LENGTH, n_mels=128)
+    M_db = librosa.power_to_db(M, ref=np.max)
+
+    # --- РИСУНОК 1: Линейная vs Мел ---
+    fig, ax = plt.subplots(1, 2, figsize=(15, 5))
+
+    img1 = librosa.display.specshow(S_db, sr=sr, hop_length=HOP_LENGTH, x_axis='time', y_axis='linear', ax=ax[0],
+                                    cmap='magma')
+    ax[0].set_title('Линейная спектрограмма (сохранены гармоники)')
+    ax[0].set_ylim(0, 14000)
+    fig.colorbar(img1, ax=ax[0], format="%+2.0f dB")
+
+    img2 = librosa.display.specshow(M_db, sr=sr, hop_length=HOP_LENGTH, x_axis='time', y_axis='mel', ax=ax[1],
+                                    cmap='magma')
+    ax[1].set_title('Мел-спектрограмма (сжатие высоких частот)')
+    fig.colorbar(img2, ax=ax[1], format="%+2.0f dB")
+
+    plt.tight_layout()
+    plt.savefig('comparison_linear_mel.png', dpi=300)
+    plt.show()
+
+    # --- РИСУНОК 2: До и После Отбеливания ---
+    # Считаем медиану по времени для каждой частоты
+    median_S = np.median(S_db, axis=1, keepdims=True)
+    S_whitened = S_db - median_S
+
+    fig, ax = plt.subplots(1, 2, figsize=(15, 5))
+
+    librosa.display.specshow(S_db, sr=sr, x_axis='time', y_axis='linear', ax=ax[0], cmap='jet', vmin=-60, vmax=0)
+    ax[0].set_title('До отбеливания (виден гул фона)')
+    ax[0].set_ylim(500, 14000)
+
+    librosa.display.specshow(S_whitened, sr=sr, x_axis='time', y_axis='linear', ax=ax[1], cmap='jet', vmin=-20, vmax=40)
+    ax[1].set_title('После спектрального отбеливания (выделен сигнал)')
+    ax[1].set_ylim(500, 14000)
+
+    plt.tight_layout()
+    plt.savefig('comparison_whitening.png', dpi=300)
+    plt.show()
+
+    # --- РИСУНОК 3: SpecAugment (Маскирование) ---
+    spec_tensor = torch.from_numpy(S_db).unsqueeze(0)
+    freq_mask = T.FrequencyMasking(freq_mask_param=50)(spec_tensor)
+    time_mask = T.TimeMasking(time_mask_param=40)(freq_mask)
+
+    plt.figure(figsize=(8, 5))
+    plt.imshow(time_mask[0].numpy(), aspect='auto', origin='lower', cmap='magma')
+    plt.title('Пример SpecAugment (частотное и временное маскирование)')
+    plt.xlabel('Время')
+    plt.ylabel('Частота')
+    plt.savefig('spec_augment_demo.png', dpi=300)
+    plt.show()
+
+
+plot_comparisons(FILE_PATH)
+'''MODEL_PATH = "best_expert_model_30k.pth"
+SAMPLE_RATE = 30242
+DURATION = 3
+N_FFT = 2048
+HOP_LENGTH = 512  
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CLASSES = ["Noise", "Beluga"]
+
+
+class ExpertVisualizer:
+    def __init__(self, model_path):
+        self.model = models.resnet18()
+        self.model.fc = nn.Linear(self.model.fc.in_features, 2)
+
+        state_dict = torch.load(model_path, map_location=DEVICE, weights_only=True)
+        self.model.load_state_dict(state_dict)
+        self.model.to(DEVICE).eval()
+
+        self.spec_transform = T.Spectrogram(n_fft=N_FFT, hop_length=HOP_LENGTH)
+        self.db_transform = T.AmplitudeToDB(top_db=80)
+
+        # Переменные для Grad-CAM
+        self.gradients = None
+        self.activations = None
+        
+        self.model.layer4[-1].register_forward_hook(self._save_activation)
+        self.model.layer4[-1].register_full_backward_hook(self._save_gradient)
+
+    def _save_activation(self, m, i, o):
+        self.activations = o
+
+    def _save_gradient(self, m, gi, go):
+        self.gradients = go[0]
+
+    def process(self, path):
+        wave, sr = torchaudio.load(path)
+        if wave.shape[0] > 1: wave = torch.mean(wave, dim=0, keepdim=True)
+        if sr != SAMPLE_RATE: wave = T.Resample(sr, SAMPLE_RATE)(wave)
+
+        num_samples = SAMPLE_RATE * DURATION
+        if wave.shape[1] > num_samples:
+            wave = wave[:, :num_samples]
+        else:
+            wave = F.pad(wave, (0, num_samples - wave.shape[1]))
+
+        spec_raw = self.spec_transform(wave)
+        spec_db = self.db_transform(spec_raw)
+
+        input_tensor = spec_db.repeat(3, 1, 1).unsqueeze(0).to(DEVICE)
+        input_tensor.requires_grad = True
+
+        out = self.model(input_tensor)
+        prob = torch.softmax(out, dim=1)
+        idx = torch.argmax(prob).item()
+
+        self.model.zero_grad()
+        out[0, idx].backward()
+
+        grads = self.gradients.detach().cpu().numpy()
+        acts = self.activations.detach().cpu().numpy()
+
+        weights = np.mean(grads, axis=(2, 3))[0]
+        cam = np.zeros(acts.shape[2:], dtype=np.float32)
+
+        for i, w in enumerate(weights):
+            cam += w * acts[0, i, :, :]
+
+        cam = np.maximum(cam, 0)
+        cam = cv2.resize(cam, (spec_db.shape[2], spec_db.shape[1]))
+        if cam.max() > 0: cam /= cam.max()
+
+        s_img = spec_db.numpy()[0]
+        vmin = np.percentile(s_img, 40)  # Было 50, сделаем 40
+        vmax = np.percentile(s_img, 99.5)
+
+        cam = np.maximum(cam, 0)
+        if cam.max() > 0:
+            cam = cam / cam.max()
+
+        cam = np.power(cam, 0.7)  
+
+        return s_img, cam, CLASSES[idx], prob[0, idx].item(), vmin, vmax
+
+
+def plot_for_vkr(file_path):
+    vis = ExpertVisualizer(MODEL_PATH)
+    spec, cam, label, conf, vmin, vmax = vis.process(file_path)
+
+    extent = [0, DURATION, 0, SAMPLE_RATE // 2]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+
+    # 1. Оригинал (используем цветовую схему 'magma' - она идеальна для гидроакустики)
+    ax1.imshow(spec, aspect='auto', origin='lower', cmap='magma',
+               extent=extent, vmin=vmin, vmax=vmax)
+    ax1.set_title(f"Детальная спектрограмма\n{os.path.basename(file_path)}")
+    ax1.set_ylabel("Частота (Гц)")
+    ax1.set_xlabel("Время (с)")
+    ax1.set_ylim(400, 14000)  # Обрезаем самый низ (гул) и самый верх (пустоту)
+
+    ax2.imshow(spec, aspect='auto', origin='lower', cmap='magma',
+               extent=extent, vmin=vmin, vmax=vmax)
+
+    cam_display = np.copy(cam)
+    cam_display[cam_display < 0.2] = 0
+
+    ax2.imshow(cam_display, aspect='auto', origin='lower', cmap='jet', alpha=0.5, extent=extent)
+    ax2.set_title(f"Результат ИИ: {label} ({conf * 100:.1f}%)\nОбласть принятия решения")
+    ax2.set_ylim(400, 14000)
+    ax2.set_xlabel("Время (с)")
+
+    plt.tight_layout()
+    # plt.savefig(f"report_{os.path.basename(file_path)}.png", dpi=300)
+    plt.show()
+
+plot_for_vkr("dataset_final/train/beluga/04.09.2020_1139белуха2.wav")'''
+
+def plot_sliding_window_demo():
+    # Генерируем тестовый сигнал (6 секунд)
+    fs = 1000
+    t = np.linspace(0, 6, 6 * fs)
+
+    # Сначала тишина, потом всплеск (белуха), потом снова тишина
+    signal = np.random.normal(0, 0.001, len(t))  # фон
+    # Добавляем "белуху" в середине
+    signal[2000:3500] += 0.1 * np.sin(2 * np.pi * 50 * t[2000:3500])
+    # Добавляем "шум" в конце, но тихий
+    signal[4500:5500] += 0.003 * np.random.randn(1000)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(t, signal, color='gray', alpha=0.5, label='Акустический сигнал')
+
+    # Параметры окон (в секундах)
+    win_len = 3.0
+    step = 1.5
+    threshold = 0.005  # RMS Порог
+
+    colors = ['blue', 'green', 'red']
+    for i, start in enumerate([0, 1.5, 3]):
+        end = start + win_len
+        idx = (t >= start) & (t <= end)
+        chunk = signal[idx]
+        rms = np.sqrt(np.mean(chunk ** 2))
+
+        # Рисуем рамку окна
+        rect_y = -0.15 - (i * 0.02)  # Смещение рамок по вертикали для наглядности
+        is_passed = rms >= threshold
+        color = colors[i] if is_passed else 'black'
+        linestyle = '-' if is_passed else '--'
+
+        ax.hlines(rect_y, start, end, colors=color, linestyles=linestyle, lw=3)
+        ax.text((start + end) / 2, rect_y - 0.01, f'Окно {i + 1}\nRMS: {rms:.4f}',
+                color=color, ha='center', va='top', fontsize=10)
+
+    # Линия порога RMS
+    ax.axhline(threshold, color='red', linestyle=':', label='Порог RMS (0.005)')
+    ax.axhline(-threshold, color='red', linestyle=':')
+
+    ax.set_title('Визуализация метода скользящего окна и RMS-фильтрации')
+    ax.set_xlabel('Время (с)')
+    ax.set_ylabel('Амплитуда')
+    ax.set_ylim(-0.3, 0.2)
+    ax.legend(loc='upper right')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('sliding_window_rms.png', dpi=300)
+    plt.show()
+
+
+plot_sliding_window_demo()
+'''
+z = np.linspace(0, 30, 100) # Глубина 30 метров
+H = 30
+
+# Идеальный волновод (синусоидальные моды)
+psi1 = np.sin(1 * np.pi * z / H)
+psi2 = np.sin(2 * np.pi * z / H)
+psi3 = np.sin(3 * np.pi * z / H)
+
+plt.figure(figsize=(6, 8))
+plt.plot(psi1, z, label='Мода 1', lw=2)
+plt.plot(psi2, z, label='Мода 2', lw=2)
+plt.plot(psi3, z, label='Мода 3', lw=2)
+plt.gca().invert_yaxis()
+plt.axhline(0, color='blue', lw=3, label='Поверхность (мягкая)')
+plt.axhline(H, color='brown', lw=3, label='Дно (жесткое)')
+plt.title('Вертикальная структура (формы) первых трех мод')
+plt.ylabel('Глубина (м)')
+plt.xlabel('Амплитуда Ψ(z)')
+plt.legend()
+plt.grid(True, linestyle='--')
+plt.show()'''
+f = np.linspace(100, 2000, 500) # Частота от 100 до 2000 Гц
+c_w = 1500 # Скорость звука в воде
+H = 30     # Глубина
+
+plt.figure(figsize=(10, 6))
+
+for m in [1, 2, 3]:
+    f_cutoff = (c_w * (2*m - 1)) / (4 * H) # Критическая частота для жесткого дна
+    v_phase = c_w / np.sqrt(1 - (f_cutoff / f)**2)
+    v_phase[f < f_cutoff] = np.nan 
+    plt.plot(f, v_phase, label=f'Мода {m}')
+
+plt.axhline(c_w, color='black', linestyle='--', label='c в воде (1500 м/с)')
+plt.ylim(1400, 2000)
+plt.title('Дисперсионные кривые (Фазовая скорость мод)')
+plt.xlabel('Частота (Гц)')
+plt.ylabel('v_phase (м/с)')
+plt.legend()
+plt.grid(True)
+plt.show()
