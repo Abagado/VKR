@@ -1,0 +1,214 @@
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchaudio
+import torchaudio.transforms as T
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models
+import random
+import time
+
+DATA_DIR = "./dataset_final"
+NUM_EPOCHS = 30
+SAMPLE_RATE = 30242
+N_FFT = 2048 # разрешение по частоте
+BATCH_SIZE = 32
+DURATION = 3  # Секунды
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class BelugaExpertDataset(Dataset):
+    def __init__(self, root_dir, augment=True):
+        self.root_dir = root_dir
+        self.augment = augment
+        self.sample_rate = 30242
+        self.duration = 3
+        self.num_samples = self.sample_rate * self.duration  # Лимит в семплах (90726)
+
+        self.file_list = []
+        for class_name in ["noise", "beluga"]:
+            p = os.path.join(root_dir, class_name)
+            if os.path.exists(p):
+                for f in os.listdir(p):
+                    if f.endswith(".wav"):
+                        self.file_list.append((os.path.join(p, f), 1 if class_name == "beluga" else 0))
+
+        # Линейная спектрограмма
+        self.spec_transform = T.Spectrogram(n_fft=2048, hop_length=512)
+        self.db_transform = T.AmplitudeToDB()
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, idx):
+        path, label = self.file_list[idx]
+
+        waveform, sr = torchaudio.load(path)
+
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+        # Фиксация длины
+        if waveform.shape[1] > self.num_samples:
+            # Если файл длиннее 3 сек — обрезаем
+            waveform = waveform[:, :self.num_samples]
+        elif waveform.shape[1] < self.num_samples:
+            # Если файл короче 3 сек — дополняем нулями
+            pad_amount = self.num_samples - waveform.shape[1]
+            waveform = F.pad(waveform, (0, pad_amount))
+
+        # Аугментация
+        if self.augment:
+            # Случайный сдвиг
+            shift = random.randint(-self.sample_rate // 2, self.sample_rate // 2)
+            waveform = torch.roll(waveform, shift, dims=1)
+
+        # Превращаем в спектрограмму
+        spec = self.spec_transform(waveform)
+        spec = self.db_transform(spec)
+
+        # Дублируем до 3 каналов для ResNet
+        return spec.repeat(3, 1, 1), label
+
+
+'''class BelugaSmartDataset(Dataset):
+    def __init__(self, root_dir, augment=False):
+        self.root_dir = root_dir
+        self.augment = augment
+        self.num_samples = SAMPLE_RATE * DURATION
+        self.file_list = []
+        self.class_to_idx = {"noise": 0, "beluga": 1}
+
+        for class_name, idx in self.class_to_idx.items():
+            path = os.path.join(root_dir, class_name)
+            if os.path.exists(path):
+                for f in os.listdir(path):
+                    if f.endswith(".wav"):
+                        self.file_list.append((os.path.join(path, f), idx))
+
+        # Список шумовых файлов для наложения
+        self.noise_pool = [f[0] for f in self.file_list if f[1] == 0]
+
+        self.mel_spec = T.MelSpectrogram(SAMPLE_RATE, n_mels=128, n_fft=1024, hop_length=512)
+        self.db_trans = T.AmplitudeToDB()
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def _fix_length(self, wave):
+        if wave.shape[1] > self.num_samples:
+            return wave[:, :self.num_samples]
+        return F.pad(wave, (0, self.num_samples - wave.shape[1]))
+
+    def __getitem__(self, idx):
+        path, label = self.file_list[idx]
+        wave, sr = torchaudio.load(path)
+
+        # Базовая обработка
+        if wave.shape[0] > 1: wave = torch.mean(wave, dim=0, keepdim=True)
+        if sr != SAMPLE_RATE: wave = T.Resample(sr, SAMPLE_RATE)(wave)
+        wave = self._fix_length(wave)
+
+        # АУГМЕНТАЦИЯ
+        if self.augment:
+            # 1. Наложение случайного шума на сигнал белухи
+            if label == 1 and len(self.noise_pool) > 0:
+                n_path = random.choice(self.noise_pool)
+                n_wave, _ = torchaudio.load(n_path)
+                if n_wave.shape[0] > 1: n_wave = torch.mean(n_wave, dim=0, keepdim=True)
+                n_wave = self._fix_length(n_wave)
+
+                # Смешиваем 
+                snr = random.uniform(0.4, 0.7)
+                wave = (wave * snr) + (n_wave * (1 - snr))
+
+            # 2. Случайный сдвиг во времени
+            wave = torch.roll(wave, shifts=random.randint(-SAMPLE_RATE, SAMPLE_RATE), dims=1)
+
+            # 3. Случайное изменение громкости
+            wave = wave * random.uniform(0.8, 1.2)
+
+        spec = self.db_trans(self.mel_spec(wave))
+        return spec.repeat(3, 1, 1), label'''
+
+def validate(model, loader, criterion):
+    model.eval()
+    val_loss = 0
+    correct = 0
+    with torch.no_grad():
+        for images, labels in loader:
+            images, labels = images.to(DEVICE), labels.to(DEVICE)
+            outputs = model(images)
+            val_loss += criterion(outputs, labels).item()
+            _, predicted = torch.max(outputs, 1)
+            correct += (predicted == labels).sum().item()
+    return val_loss / len(loader), 100 * correct / len(loader.dataset)
+
+
+if __name__ == '__main__':
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Использую: {DEVICE}")
+
+    FINAL_DATA_DIR = "./dataset_final"
+
+    train_ds = BelugaExpertDataset(os.path.join(FINAL_DATA_DIR, "train"), augment=True)
+    val_ds = BelugaExpertDataset(os.path.join(FINAL_DATA_DIR, "val"), augment=False)
+
+    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, num_workers=0)
+
+    model = models.resnet18(weights='DEFAULT')  # Берем чистые веса ImageNet
+    model.fc = nn.Linear(model.fc.in_features, 2)
+    model = model.to(DEVICE)
+
+    criterion = nn.CrossEntropyLoss(weight=torch.tensor([1.2, 1.0]).to(DEVICE))
+
+    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+    best_acc = 0.0
+    NUM_EPOCHS = 30
+
+    print(f"Начинаю обучение модели. Эпох: {NUM_EPOCHS}")
+
+    for epoch in range(NUM_EPOCHS):
+        model.train()
+        running_loss = 0.0
+        start_t = time.time()
+
+        for batch_idx, (images, labels) in enumerate(train_loader):
+            images, labels = images.to(DEVICE), labels.to(DEVICE)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+
+            if batch_idx % 5 == 0:
+                print(
+                    f"Эпоха [{epoch + 1}/{NUM_EPOCHS}] | Батч [{batch_idx}/{len(train_loader)}] | Loss: {loss.item():.4f}")
+
+        # Валидация
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for imgs, lbls in val_loader:
+                imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
+                out = model(imgs)
+                _, pred = torch.max(out, 1)
+                total += lbls.size(0)
+                correct += (pred == lbls).sum().item()
+
+        val_acc = 100 * correct / total
+        print(
+            f"\n>>> ИТОГ ЭПОХИ {epoch + 1}: Точность на валидации: {val_acc:.2f}% | Время: {time.time() - start_t:.1f}с\n")
+
+        if val_acc >= best_acc:
+            best_acc = val_acc
+            torch.save(model.state_dict(), "best_expert_model_30k.pth")
+            print(f"--- Модель-эксперт сохранена (Acc: {val_acc:.2f}%) ---")
+
+    print(f"Обучение завершено! Лучший результат: {best_acc:.2f}%")
