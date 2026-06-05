@@ -1,0 +1,86 @@
+import torch
+import torchaudio
+import torchaudio.transforms as T
+import torch.nn.functional as F
+import os
+from torchvision import models
+import torch.nn as nn
+
+MODEL_PATH = "best_expert_model_30k.pth"
+TEST_DIR = "./test"
+SAMPLE_RATE = 30242
+DURATION = 3
+N_FFT = 2048
+HOP_LENGTH = 512
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CLASSES = ["Noise", "Beluga"]
+
+
+class ExpertPredictor:
+    def __init__(self, model_path):
+        self.model = models.resnet18()
+        self.model.fc = nn.Linear(self.model.fc.in_features, 2)
+        self.model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        self.model.to(DEVICE)
+        self.model.eval()
+        self.spec_transform = T.Spectrogram(n_fft=N_FFT, hop_length=HOP_LENGTH)
+        self.db_transform = T.AmplitudeToDB()
+
+    def predict(self, file_path):
+        waveform, sr = torchaudio.load(file_path)
+        if waveform.shape[0] > 1: waveform = torch.mean(waveform, dim=0, keepdim=True)
+        if sr != SAMPLE_RATE: waveform = T.Resample(sr, SAMPLE_RATE)(waveform)
+
+        num_samples = SAMPLE_RATE * DURATION
+        if waveform.shape[1] > num_samples:
+            waveform = waveform[:, :num_samples]
+        else:
+            waveform = F.pad(waveform, (0, num_samples - waveform.shape[1]))
+
+        spec = self.db_transform(self.spec_transform(waveform))
+        input_tensor = spec.repeat(3, 1, 1).unsqueeze(0).to(DEVICE)
+
+        with torch.no_grad():
+            output = self.model(input_tensor)
+            probs = torch.softmax(output, dim=1)
+            conf, pred = torch.max(probs, 1)
+        return pred.item(), conf.item()
+
+
+if __name__ == "__main__":
+    predictor = ExpertPredictor(MODEL_PATH)
+    errors = []
+
+    print("\n ИТОГОВОЕ ТЕСТИРОВАНИЕ МОДЕЛИ ")
+
+    for target_idx, class_name in enumerate(["noise", "beluga"]):
+        path = os.path.join(TEST_DIR, class_name)
+        if not os.path.exists(path): continue
+
+        correct = 0
+        total = 0
+        for f in os.listdir(path):
+            if f.endswith(".wav"):
+                file_full_path = os.path.join(path, f)
+                res, conf = predictor.predict(file_full_path)
+
+                if res == target_idx:
+                    correct += 1
+                else:
+                    errors.append({
+                        "file": f,
+                        "true_label": CLASSES[target_idx],
+                        "pred_label": CLASSES[res],
+                        "conf": conf
+                    })
+                total += 1
+
+        print(f"Класс {class_name.upper()}: {correct}/{total} верно ({(correct / total) * 100:.2f}%)")
+
+    if errors:
+        print("\n--- СПИСОК ОШИБОК МОДЕЛИ ---")
+        for err in errors:
+            print(
+                f"Файл: {err['file']} | Должно быть: {err['true_label']} | Предсказано: {err['pred_label']} (Уверенность: {err['conf'] * 100:.1f}%)")
+    else:
+        print("\nОшибок не обнаружено!")
